@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# PyInstaller
+*.spec
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+
+# Cache
+.cache/
+
+# Models / weights (downloaded at runtime)
+models/

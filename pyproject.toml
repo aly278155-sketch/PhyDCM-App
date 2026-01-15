@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phydcm-app"
+version = "0.1.0"
+description = "AI-powered medical image diagnosis and prediction desktop application based on PhyDCM"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Mohammed Hadi Rahim"}
+]
+
+dependencies = [
+  "PyQt5>=5.15",
+  "numpy",
+  "pydicom",
+  "matplotlib"
+]
+
+[project.optional-dependencies]
+ai = ["phydcm"]
+
+[project.scripts]
+phydcm-app = "phydcm_app.app:main"

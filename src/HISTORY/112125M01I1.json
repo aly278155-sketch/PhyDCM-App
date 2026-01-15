@@ -1,0 +1,86 @@
+{
+  "version": "PhyDCM-HISTORY-1",
+  "saved_at": "2026-01-15T11:21:34",
+  "patient_id": "112125M01I1",
+  "table": {
+    "headers": [
+      "Sequence Count",
+      "ID",
+      "Patient Name",
+      "Age",
+      "Gender",
+      "Diagnosis Date",
+      "Diagnosis Time",
+      "Scan Type",
+      "Image Type",
+      "Image Dimensions",
+      "Image Quality",
+      "Brightness",
+      "Sharpness",
+      "Diagnosis",
+      "Confidence %",
+      "Processing_Time_Seconds"
+    ],
+    "rows": [
+      {
+        "Sequence Count": "160",
+        "ID": "112021M01I1",
+        "Patient Name": "mohammed hadi",
+        "Age": "21",
+        "Gender": "Male",
+        "Diagnosis Date": "2026-01-15",
+        "Diagnosis Time": "11:20",
+        "Scan Type": "MRI",
+        "Image Type": "Voxel",
+        "Image Dimensions": "3D",
+        "Image Quality": "High",
+        "Brightness": "Optimal",
+        "Sharpness": "High",
+        "Diagnosis": "notumor",
+        "Confidence %": "84.9%",
+        "Processing_Time_Seconds": "0.98"
+      },
+      {
+        "Sequence Count": "160",
+        "ID": "112125M01I1",
+        "Patient Name": "moahmmed hadi",
+        "Age": "25",
+        "Gender": "Male",
+        "Diagnosis Date": "2026-01-15",
+        "Diagnosis Time": "11:21",
+        "Scan Type": "MRI",
+        "Image Type": "Voxel",
+        "Image Dimensions": "3D",
+        "Image Quality": "High",
+        "Brightness": "Optimal",
+        "Sharpness": "High",
+        "Diagnosis": "notumor",
+        "Confidence %": "84.9%",
+        "Processing_Time_Seconds": "0.14"
+      }
+    ]
+  },
+  "images_state": {
+    "loaded_from_folder": true,
+    "current_images": [
+      "D:/Data Set/Data Set 4/DOI/RIDER Neuro MRI-1205970977/1.3.6.1.4.1.9328.50.16.157751917431845794329159545034458365619/1.3.6.1.4.1.9328.50.16.133231073800087231678939981791971992913"
+    ],
+    "chosen_source_path": "D:\\Data Set\\Data Set 4\\DOI\\RIDER Neuro MRI-1205970977\\1.3.6.1.4.1.9328.50.16.157751917431845794329159545034458365619\\1.3.6.1.4.1.9328.50.16.133231073800087231678939981791971992913\\000066.dcm",
+    "viewer_chosen": {
+      "orientation": "sagittal",
+      "idx_axial": 80,
+      "idx_coronal": 128,
+      "idx_sagittal": 95
+    },
+    "viewer_axial": {
+      "idx_axial": 80
+    },
+    "viewer_sagittal": {
+      "idx_sagittal": 118
+    },
+    "viewer_coronal": {
+      "idx_coronal": 79
+    },
+    "active_mpr": "sagittal"
+  }
+}
