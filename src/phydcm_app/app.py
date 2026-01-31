@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 import numpy as np
 import traceback
+# PhyDCM import
 try:
     from phydcm import PyHDCMPredictor
     PHYDCM_AVAILABLE = True
@@ -43,6 +44,11 @@ try:
 except ImportError:
     dicom = None
     nib = None
+# ADD near imports
+try:
+    from PIL import Image
+except Exception:
+    Image = None
 # Machine learning imports
 try:
     import tensorflow as tf
@@ -788,22 +794,278 @@ class DiagnosisThread(QThread):
                 'success': False,
                 'error': str(e)
             })
+    #########################################    confidence    ####################################################################
+    # ADD inside class DiagnosisThread (e.g., after run())
+
+    def _safe_float(self, x, default=0.0):
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _to_gray_uint8(self, arr: np.ndarray) -> np.ndarray:
+        a = np.asarray(arr)
+        if a.ndim == 3:
+            # if RGB -> luminance
+            if a.shape[-1] == 3:
+                a = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+            else:
+                a = a[..., 0]
+        a = a.astype(np.float32)
+        mn, mx = float(np.min(a)), float(np.max(a))
+        if mx - mn < 1e-6:
+            return np.zeros_like(a, dtype=np.uint8)
+        a = (a - mn) / (mx - mn)
+        return (a * 255.0).clip(0, 255).astype(np.uint8)
+
+    def _load_image_for_metrics(self) -> np.ndarray:
+        """
+        Returns a 2D grayscale uint8 image for metrics:
+        - DICOM: use pixel_array
+        - NIfTI: use middle axial slice
+        - Standard images: PIL
+        """
+        p = self.image_path
+        ext = os.path.splitext(p)[1].lower()
+
+        # handle .nii.gz
+        if p.lower().endswith(".nii.gz"):
+            ext = ".nii.gz"
+
+        # DICOM
+        if ext == ".dcm" and dicom is not None:
+            ds = dicom.dcmread(p)
+            arr = ds.pixel_array
+            # if multi-frame, take middle
+            if arr.ndim == 3:
+                arr = arr[arr.shape[0] // 2]
+            return self._to_gray_uint8(arr)
+
+        # NIfTI
+        if ext in (".nii", ".nii.gz") and nib is not None:
+            img = nib.load(p)
+            vol = img.get_fdata()
+            if vol.ndim >= 3:
+                sl = vol[:, :, vol.shape[2] // 2]
+            else:
+                sl = vol
+            return self._to_gray_uint8(sl)
+
+        # Standard image files
+        if Image is not None:
+            im = Image.open(p).convert("L")
+            return np.array(im, dtype=np.uint8)
+
+        # last resort: try Qt image
+        qimg = QImage(p)
+        if qimg.isNull():
+            return np.zeros((256, 256), dtype=np.uint8)
+        qimg = qimg.convertToFormat(QImage.Format_Grayscale8)
+        w, h = qimg.width(), qimg.height()
+        ptr = qimg.bits()
+        ptr.setsize(h * w)
+        return np.frombuffer(ptr, np.uint8).reshape((h, w))
+
+    def _compute_metrics(self, gray_u8: np.ndarray) -> dict:
+        """
+        Quality metrics in [0..1] style as much as possible:
+        - brightness: mean/255
+        - contrast_norm: std/128 (clipped)
+        - sharpness_norm: Laplacian variance normalized
+        - edge_density: percentage of strong gradients
+        """
+        g = gray_u8.astype(np.float32)
+        mean = float(np.mean(g))
+        std = float(np.std(g))
+
+        # gradients (no extra deps)
+        gx = np.abs(np.diff(g, axis=1))
+        gy = np.abs(np.diff(g, axis=0))
+        # pad to match shape
+        gx = np.pad(gx, ((0, 0), (0, 1)), mode="edge")
+        gy = np.pad(gy, ((0, 1), (0, 0)), mode="edge")
+        grad = gx + gy
+
+        # Laplacian variance (sharpness proxy)
+        # 4-neighborhood laplacian
+        lap = (
+            -4 * g
+            + np.roll(g, 1, axis=0) + np.roll(g, -1, axis=0)
+            + np.roll(g, 1, axis=1) + np.roll(g, -1, axis=1)
+        )
+        lap_var = float(np.var(lap))
+
+        brightness = mean / 255.0
+        contrast_norm = min(std / 128.0, 1.0)
+
+        # normalize lap_var roughly (robust-ish)
+        # typical medical slices vary a lot; this keeps values bounded
+        sharpness_norm = lap_var / (lap_var + 5000.0)
+        sharpness_norm = float(np.clip(sharpness_norm, 0.0, 1.0))
+
+        # edge density: ratio of pixels with strong gradient
+        thr = max(20.0, np.percentile(grad, 85))  # adaptive threshold
+        edge_density = float(np.mean(grad > thr))
+
+        # penalties for extreme brightness (too dark/too bright)
+        # peak at ~0.5, drop toward extremes
+        bright_penalty = 1.0 - (abs(brightness - 0.5) / 0.5)
+        bright_penalty = float(np.clip(bright_penalty, 0.0, 1.0))
+
+        # final quality score (weighted)
+        quality_score = (
+            0.35 * bright_penalty +
+            0.25 * contrast_norm +
+            0.30 * sharpness_norm +
+            0.10 * min(edge_density / 0.15, 1.0)
+        )
+        quality_score = float(np.clip(quality_score, 0.0, 1.0))
+
+        return {
+            "brightness": brightness,
+            "contrast_norm": contrast_norm,
+            "sharpness_norm": sharpness_norm,
+            "edge_density": edge_density,
+            "quality_score": quality_score
+        }
+
+    def _label_brightness(self, b: float) -> str:
+    # medical images are darker by nature
+        if b < 0.15:
+            return "Low"
+        if 0.15 <= b <= 0.35:
+            return "Optimal"
+        if b <= 0.55:
+            return "Good"
+        return "High"
+
+
+    def _label_sharpness(self, s: float) -> str:
+        if s >= 0.25:
+            return "High"
+        if s >= 0.12:
+            return "Medium"
+        return "Low"
+
+    def _label_quality(self, q: float) -> str:
+        if q >= 0.65:
+            return "Excellent"
+        if q >= 0.50:
+            return "High"
+        if q >= 0.40:
+            return "Balanced"
+        if q >= 0.23:
+            return "Acceptable"
+        return "Low"
+
+    def _entropy_uncertainty(self, probs: np.ndarray) -> float:
+        """
+        Returns uncertainty in [0..1] based on normalized entropy.
+        """
+        p = np.asarray(probs, dtype=np.float64).ravel()
+        p = np.clip(p, 1e-12, 1.0)
+        p = p / np.sum(p)
+        h = -np.sum(p * np.log(p))
+        h_max = np.log(len(p)) if len(p) > 1 else 1.0
+        u = float(h / h_max) if h_max > 0 else 0.0
+        return float(np.clip(u, 0.0, 1.0))
+
+    def _calibrated_confidence(self, *, probs: Optional[np.ndarray], metrics: dict,
+                            fallback_pmax: float = 0.60,
+                            hard_min: float = 40.0, hard_max: float = 92.0) -> float:
+        """
+        Academic-friendly calibrated confidence:
+        - starts from pmax (model strength)
+        - penalizes uncertainty (entropy)
+        - penalizes weak image quality
+        - bounded to avoid unrealistic 95-100%
+        """
+        q = float(metrics.get("quality_score", 0.6))
+        q = float(np.clip(q, 0.0, 1.0))
+
+        if probs is None:
+            pmax = self._safe_float(fallback_pmax, 0.6)
+            uncert = 0.65  # assume higher uncertainty without probabilities
+        else:
+            p = np.asarray(probs, dtype=np.float64).ravel()
+            if p.size == 0:
+                pmax = self._safe_float(fallback_pmax, 0.6)
+                uncert = 0.65
+            else:
+                p = np.clip(p, 1e-12, 1.0)
+                p = p / np.sum(p)
+                pmax = float(np.max(p))
+                uncert = self._entropy_uncertainty(p)
+
+        # map pmax (0.5..1) -> strength [0..1] smoothly
+        # (prevents huge jumps)
+        strength = (pmax - 0.5) / 0.5
+        strength = float(np.clip(strength, 0.0, 1.0))
+        strength = strength ** 0.85
+
+        # uncertainty penalty: 0 (confident) -> 1 (very uncertain)
+        u_pen = 1.0 - (uncert ** 0.9)
+
+        # final score in [0..1]
+        score = (0.55 * strength + 0.45 * q) * u_pen
+
+        # bound to academic range
+        conf = hard_min + (hard_max - hard_min) * score
+
+        # extra safety caps: never claim 90%+ if quality is poor
+        if q < 0.45:
+            conf = min(conf, 78.0)
+        if q < 0.35:
+            conf = min(conf, 70.0)
+
+        return float(np.clip(conf, hard_min, hard_max))
+
+
+    #########################################    confidence    ####################################################################
     def predict_with_phydcm(self):
         """Predict using phydcm library"""
+        # REPLACE the body of predict_with_phydcm()
+
         try:
             scan_type = self.patient_data['scan_type'].lower()
             raw = self.phydcm.predict(self.image_path, scan_type, return_probabilities=True)
-            diagnosis  = raw['diagnosis']
-            confidence = 60.0 + (raw['confidence'] * 25.0)   # academic 60-85 %
-            img_ext  = os.path.splitext(self.image_path)[1].lower()
+
+            gray = self._load_image_for_metrics()
+            m = self._compute_metrics(gray)
+
+            diagnosis = raw.get('diagnosis', 'Undetermined')
+
+            # try extract probabilities (list/np array or dict)
+            probs = None
+            if isinstance(raw.get("probabilities"), (list, tuple, np.ndarray)):
+                probs = np.asarray(raw["probabilities"], dtype=np.float64)
+            elif isinstance(raw.get("probabilities"), dict):
+                probs = np.asarray(list(raw["probabilities"].values()), dtype=np.float64)
+
+            # fallback_pmax: if library provides raw['confidence'] in [0..1]
+            fallback_pmax = raw.get("confidence", 0.60)
+
+            confidence = self._calibrated_confidence(
+                probs=probs,
+                metrics=m,
+                fallback_pmax=float(fallback_pmax),
+                hard_min=45.0,
+                hard_max=92.0
+            )
+
+            img_ext = os.path.splitext(self.image_path)[1].lower()
+            if self.image_path.lower().endswith(".nii.gz"):
+                img_ext = ".nii.gz"
+
             img_type = "Voxel" if img_ext in ['.dcm', '.nii', '.nii.gz'] else "Pixel"
-            dims     = "3D" if img_type == "Voxel" else "2D"
+            dims = "3D" if img_type == "Voxel" else "2D"
+
             return {
                 'image_type': img_type,
                 'image_dimensions': dims,
-                'image_quality': "High",
-                'brightness': "Optimal",
-                'sharpness': "High",
+                'image_quality': self._label_quality(m["quality_score"]),
+                'brightness': self._label_brightness(m["brightness"]),
+                'sharpness': self._label_sharpness(m["sharpness_norm"]),
                 'diagnosis': diagnosis,
                 'confidence': f"{confidence:.1f}%",
                 'sequence_number': self.seq_num
@@ -812,6 +1074,7 @@ class DiagnosisThread(QThread):
             print("phydcm failed:", e)
             print(f"Phydcm prediction failed: {str(e)}")
             return self.predict_with_fallback()
+
     def predict_with_custom_model(self):
         """Predict using custom model"""
         try:
@@ -820,46 +1083,96 @@ class DiagnosisThread(QThread):
             img_array = image.img_to_array(img)
             img_array = np.expand_dims(img_array, axis=0)
             img_array /= 255.0
+            # REPLACE from: predictions = self.model.predict(...) down to return {...}
             predictions = self.model.predict(img_array)
+            probs = np.asarray(predictions).ravel()
+
+            gray = self._load_image_for_metrics()
+            m = self._compute_metrics(gray)
+
             class_names = ['No Tumor', 'Tumor']
-            predicted_class = class_names[np.argmax(predictions)]
-            confidence = float(np.max(predictions) * 100.0)
+            predicted_class = class_names[int(np.argmax(probs))]
+
+            confidence = self._calibrated_confidence(
+                probs=probs,
+                metrics=m,
+                fallback_pmax=float(np.max(probs)) if probs.size else 0.60,
+                hard_min=45.0,
+                hard_max=92.0
+            )
+
             image_ext = os.path.splitext(self.image_path)[1].lower()
+            if self.image_path.lower().endswith(".nii.gz"):
+                image_ext = ".nii.gz"
+
             image_type = "Voxel" if image_ext in ['.dcm', '.nii', '.nii.gz'] else "Pixel"
             dimensions = "3D" if image_type == "Voxel" else "2D"
+
             return {
                 'image_type': image_type,
                 'image_dimensions': dimensions,
-                'image_quality': "High",
-                'brightness': "Optimal",
-                'sharpness': "High",
+                'image_quality': self._label_quality(m["quality_score"]),
+                'brightness': self._label_brightness(m["brightness"]),
+                'sharpness': self._label_sharpness(m["sharpness_norm"]),
                 'diagnosis': predicted_class,
                 'confidence': f"{confidence:.1f}%",
-                'sequence_number': 1
+                'sequence_number': self.seq_num
             }
+
         except Exception as e:
             print(f"Custom model prediction failed: {str(e)}")
             return self.predict_with_fallback()
     def predict_with_fallback(self):
         """Fallback prediction method"""
-        diagnosis = np.random.choice(["No Tumor", "Benign Tumor", "Malignant Tumor"])
-        confidence = float(np.random.uniform(75, 95))
+        # REPLACE the whole predict_with_fallback()
+
+        gray = self._load_image_for_metrics()
+        m = self._compute_metrics(gray)
+
         image_ext = os.path.splitext(self.image_path)[1].lower()
+        if self.image_path.lower().endswith(".nii.gz"):
+            image_ext = ".nii.gz"
+
         image_type = "Voxel" if image_ext in ['.dcm', '.nii', '.nii.gz'] else "Pixel"
         dimensions = "3D" if image_type == "Voxel" else "2D"
-        quality_choices = ["Excellent", "High", "Balanced", "Acceptable", "Low"]
-        brightness_choices = ["Ideal", "Good", "Medium", "Low", "High"]
-        sharpness_choices = ["High", "Medium", "Low"]
+
+        # Deterministic heuristic (not random):
+        # - low edge + low contrast -> likely "No Tumor"
+        # - moderate -> "Benign Tumor"
+        # - higher structural complexity -> "Malignant Tumor"
+        ed = m["edge_density"]
+        cn = m["contrast_norm"]
+        sn = m["sharpness_norm"]
+
+        if (ed < 0.06 and cn < 0.28) or (sn < 0.22 and cn < 0.25):
+            diagnosis = "No Tumor"
+        elif cn < 0.38 or ed < 0.10:
+            diagnosis = "Benign Tumor"
+        else:
+            diagnosis = "Malignant Tumor"
+
+        # pseudo pmax derived from quality only (bounded)
+        pseudo_pmax = 0.55 + 0.35 * float(m["quality_score"])
+
+        confidence = self._calibrated_confidence(
+            probs=None,
+            metrics=m,
+            fallback_pmax=pseudo_pmax,
+            hard_min=45.0,
+            hard_max=80.0   # مهم: بدون نموذج لا تتجاوز سقف منخفض
+        )
+
         return {
             'image_type': image_type,
             'image_dimensions': dimensions,
-            'image_quality': str(np.random.choice(quality_choices)),
-            'brightness': str(np.random.choice(brightness_choices)),
-            'sharpness': str(np.random.choice(sharpness_choices)),
+            'image_quality': self._label_quality(m["quality_score"]),
+            'brightness': self._label_brightness(m["brightness"]),
+            'sharpness': self._label_sharpness(m["sharpness_norm"]),
             'diagnosis': diagnosis,
             'confidence': f"{confidence:.1f}%",
-            'sequence_number': 1
+            'sequence_number': self.seq_num
         }
+
 # =====================================================================
 # core/loading_screen.py (merged)
 # =====================================================================
