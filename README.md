@@ -56,7 +56,7 @@
     </td>
     <td align="center">
       <img src="pictures/team/ali_hussein.jpg" width="160"/><br/>
-      <b>Ali Hussein Alawi</b><br/>
+      <b>Ali Hussein Allawi</b><br/>
       <sub>Student Researcher</sub>
     </td>
     <td></td>
